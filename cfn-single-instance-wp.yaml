@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates a single instance and database in RDS with Wordpress installed and ready to go
+Parameters:
+  KeyName:
+    Default: James
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.medium
+    AllowedValues:
+      - t2.medium
+    ConstraintDescription: must be a valid EC2 instance type.
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  DBName:
+    Default: wpdb
+    Description: The name of the database that will be created for wordpress to use
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+  DBUsername:
+    Default: wp
+    Description: Username for database access
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    Default: YJXr6dtm8KGR0R4Cs5zK
+    NoEcho: 'true'
+    Description: Password for database access
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+Resources:
+  DBInstance:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBName: !Ref DBName
+      Engine: MySQL
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: db.t2.medium
+      AllocatedStorage: "50"
+      VPCSecurityGroups:
+        - !GetAtt DBSecurityGroup.GroupId
+  EC2Instance:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          default: [extras, install, config]
+        extras:
+          commands:
+            enable_php72:
+              command: 'amazon-linux-extras enable lamp-mariadb10.2-php7.2'
+        install:
+          packages:
+            yum:
+              php: []
+              httpd: []
+              mariadb: []
+              php-mysqlnd: []
+          services:
+            sysvinit:
+              httpd:
+                enabled: "true"
+                ensureRunning: "true"
+          files:
+            /usr/local/bin/wp:
+              source: "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar"
+              mode: "000755"
+          commands:
+            download_wp:
+              command: wp core download --path='/var/www/html/'
+        config:
+          commands:
+            01_create_wpconfig:
+              command: !Sub
+                - wp config create --dbname=${DBName} --dbuser=${DBUsername} --dbpass=${DBPassword} --dbhost=${DBInstanceEndpoint} --path='/var/www/html/'
+                - DBName: !Ref DBName
+                  DBUsername: !Ref DBUsername
+                  DBPassword: !Ref DBPassword
+                  DBInstanceEndpoint: !GetAtt DBInstance.Endpoint.Address
+            02_install_wp:
+              command: wp core install --url=$(curl http://169.254.169.254/latest/meta-data/public-hostname) --title=Example --admin_user=admin --admin_email=info@example.com --skip-email --admin_password=pass1234! --path='/var/www/html/'
+            03_add_user_to_group:
+              command: usermod -a -G apache ec2-user
+            04_dir_ownership:
+              command: chown -R ec2-user:apache /var/www && chmod 2775 /var/www
+            05_dir_and_file_permissions:
+              command: find /var/www -type d -exec sudo chmod 2775 {} \; && find /var/www -type f -exec sudo chmod 0664 {} \;
+    Properties:
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      KeyName: !Ref KeyName
+      ImageId: !Ref LatestAmiId
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -x
+          yum update -y
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: "PT2M"
+  DBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable DB access from web instances
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          SourceSecurityGroupId: !GetAtt InstanceSecurityGroup.GroupId
+  InstanceSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable SSH and HTTP access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: !Ref SSHLocation
+Outputs:
+  InstanceId:
+    Description: InstanceId of the newly created EC2 instance
+    Value: !Ref EC2Instance
+  PublicDNS:
+    Description: Public DNSName of the newly created EC2 instance
+    Value: !GetAtt EC2Instance.PublicDnsName
+  RDS:
+    Description: Database created in RDS
+    Value: !Ref DBInstance
