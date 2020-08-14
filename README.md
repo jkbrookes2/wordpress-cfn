@@ -8,3 +8,4 @@ Some changes I'd like to continue making to this script:
 * Autogenerate the database and wordpress passwords here and store them as secrets
 * Use an Aurora cluster instead of a single MySQL RDS instance
 * Go from a single web server to a cluster backed by EFS
+* Create a separate VPC and subnets instead of using the default
